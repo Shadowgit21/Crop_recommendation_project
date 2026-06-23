@@ -1,7 +1,3 @@
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -10,27 +6,65 @@ import requests
 import json
 import pickle
 import joblib
-from datetime import datetime
+import sqlite3
+import datetime
+import os
+import sys
+from dotenv import load_dotenv
 
-# Import our modular helpers
-from src.utils.weather import get_weather
-from src.utils.database import init_db, save_recommendation
+# =============================================
+# 1. DATABASE FUNCTIONS (built-in)
+# =============================================
+def init_db():
+    conn = sqlite3.connect('history.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS recommendations
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  date TEXT, crop TEXT, 
+                  N INT, P INT, K INT, temp REAL, humidity REAL, ph REAL, rainfall REAL)''')
+    conn.commit()
+    conn.close()
 
-# Initialize database
+def save_recommendation(crop, features):
+    conn = sqlite3.connect('history.db')
+    c = conn.cursor()
+    c.execute("""INSERT INTO recommendations 
+                 (date, crop, N, P, K, temp, humidity, ph, rainfall) 
+                 VALUES (?,?,?,?,?,?,?,?,?)""",
+              (datetime.datetime.now().isoformat(), crop, *features))
+    conn.commit()
+    conn.close()
+
+# =============================================
+# 2. WEATHER FUNCTION
+# =============================================
+load_dotenv()
+def get_weather(city):
+    api_key = os.getenv("OPENWEATHER_API_KEY")
+    if not api_key:
+        return None
+    try:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "temp": data['main']['temp'],
+                "humidity": data['main']['humidity'],
+                "description": data['weather'][0]['description'].capitalize(),
+            }
+    except:
+        return None
+    return None
+
+# =============================================
+# 3. PAGE CONFIGURATION
+# =============================================
+st.set_page_config(page_title="🌾 Smart Crop Assistant", page_icon="🌱", layout="wide")
 init_db()
 
 # =============================================
-# 1. PAGE CONFIGURATION
-# =============================================
-st.set_page_config(
-    page_title="🌾 Smart Crop Assistant",
-    page_icon="🌱",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# =============================================
-# 2. CUSTOM CSS
+# 4. CUSTOM CSS
 # =============================================
 st.markdown("""
 <style>
@@ -46,7 +80,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================================
-# 3. LOAD MODEL AND ENCODER
+# 5. LOAD MODEL AND ENCODER
 # =============================================
 @st.cache_resource
 def load_models():
@@ -60,29 +94,26 @@ def load_models():
 model, encoder = load_models()
 
 # =============================================
-# 4. SIDEBAR - NAVIGATION
+# 6. SIDEBAR - NAVIGATION
 # =============================================
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2917/2917995.png", width=80)
     st.markdown("## 🌿 Navigation")
-    
     app_mode = st.radio(
         "Select Feature",
         ["🌾 Crop Recommendation", "🧪 Disease Detection"],
         index=0,
         label_visibility="collapsed"
     )
-    
     st.divider()
     st.markdown("### ⚙️ Weather Settings")
     api_key = st.text_input("OpenWeather API Key", type="password", placeholder="Enter your key")
     city = st.text_input("📍 City", value="Delhi")
-    
     st.divider()
     st.caption("🌱 Smart Crop Assistant v2.0")
 
 # =============================================
-# 5. FEATURE 1: CROP RECOMMENDATION
+# 7. FEATURE 1: CROP RECOMMENDATION
 # =============================================
 if app_mode == "🌾 Crop Recommendation":
     st.markdown("# 🌾 Smart Crop Recommendation")
@@ -100,30 +131,24 @@ if app_mode == "🌾 Crop Recommendation":
     
     st.divider()
 
-    # Input Section
     col1, col2 = st.columns([2, 1])
-    
     with col1:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.subheader("🌱 Soil & Environmental Parameters")
-        
-        N = st.slider("🧪 Nitrogen (N)", 0, 140, 50, help="Nitrogen content in soil (ppm)")
+        N = st.slider("🧪 Nitrogen (N)", 0, 140, 50)
         P = st.slider("🧪 Phosphorus (P)", 0, 145, 50)
         K = st.slider("🧪 Potassium (K)", 0, 205, 50)
         temperature = st.slider("🌡️ Temperature (°C)", 0.0, 50.0, 25.0, step=0.5)
         humidity = st.slider("💧 Humidity (%)", 0.0, 100.0, 60.0)
         ph = st.slider("⚗️ Soil pH", 3.5, 10.0, 6.5, step=0.1)
         rainfall = st.slider("🌧️ Rainfall (mm)", 0.0, 300.0, 100.0)
-        
         if ph < 5.5 or ph > 8.0:
             st.warning("⚠️ pH outside ideal range (5.5 - 8.0). Consider soil amendments.")
-        
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.subheader("📊 Results")
-        
         if st.button("🌿 Recommend Crop", use_container_width=True):
             if model is None or encoder is None:
                 st.error("❌ Model not loaded. Please train the model first.")
@@ -131,16 +156,11 @@ if app_mode == "🌾 Crop Recommendation":
                 features = np.array([[N, P, K, temperature, humidity, ph, rainfall]])
                 pred_num = model.predict(features)[0]
                 crop = encoder.inverse_transform([pred_num])[0]
-                
-                # Confidence
                 confidence = 0.0
                 if hasattr(model, "predict_proba"):
                     probs = model.predict_proba(features)
                     confidence = float(np.max(probs) * 100)
-                
-                # Save to database
                 save_recommendation(crop, [N, P, K, temperature, humidity, ph, rainfall])
-                
                 st.markdown(f"""
                 <div class="result-box">
                     <h2>🌾 RECOMMENDED</h2>
@@ -148,8 +168,6 @@ if app_mode == "🌾 Crop Recommendation":
                     <p style="font-size:1.2rem;">Confidence: {confidence:.1f}%</p>
                 </div>
                 """, unsafe_allow_html=True)
-                
-                # Crop Tips
                 tips = {
                     "Rice": "🌾 Requires standing water. Ensure good irrigation.",
                     "Wheat": "🌾 Cool season crop. Needs well-drained soil.",
@@ -160,40 +178,32 @@ if app_mode == "🌾 Crop Recommendation":
                     "Banana": "🍌 Requires high humidity and consistent rainfall."
                 }
                 st.info(f"💡 **Pro Tip**: {tips.get(crop, 'Ensure proper crop rotation and organic fertilizers.')}")
-        
         st.markdown('</div>', unsafe_allow_html=True)
 
 # =============================================
-# 6. FEATURE 2: DISEASE DETECTION (DEMO MODE)
+# 8. FEATURE 2: DISEASE DETECTION (DEMO)
 # =============================================
 else:
     st.markdown("# 🧪 Plant Disease Detection")
     st.markdown("Upload a photo of your crop leaf to diagnose diseases and get treatment methods")
-    
     st.divider()
-    
     uploaded_file = st.file_uploader(
         "📤 Upload a leaf image (JPG, PNG, JPEG)",
         type=["jpg", "jpeg", "png"],
         help="Ensure the leaf is clearly visible in good lighting"
     )
-    
     if uploaded_file is not None:
         col1, col2 = st.columns([1, 1])
-        
         with col1:
             image = Image.open(uploaded_file)
             st.image(image, caption="📸 Uploaded Leaf", use_container_width=True)
-        
         with col2:
             if st.button("🔬 Analyze Disease", use_container_width=True):
                 with st.spinner("🧪 Analyzing..."):
-                    # === DEMO MODE ===
                     import random
                     diseases = ["Bacterial Spot", "Healthy", "Leaf Blight", "Powdery Mildew", "Rust"]
                     result = random.choice(diseases)
                     confidence = round(random.uniform(85.0, 99.0), 1)
-                    
                     if result != "Healthy":
                         st.markdown(f"""
                         <div class="disease-box">
@@ -202,39 +212,34 @@ else:
                             <p>Confidence: {confidence}%</p>
                         </div>
                         """, unsafe_allow_html=True)
-                        
                         treatments = {
                             "Bacterial Spot": """
-                                🧪 **Treatment & Removal Methods:**
-                                1. 🗑️ Remove and destroy infected leaves immediately.
+                                🧪 **Treatment:**
+                                1. 🗑️ Remove infected leaves.
                                 2. 💧 Avoid overhead watering.
-                                3. 🧴 Apply copper-based bactericides weekly.
-                                4. 🌱 Rotate crops with non-host plants.
-                                5. 🧤 Disinfect gardening tools.
+                                3. 🧴 Apply copper-based bactericides.
+                                4. 🌱 Rotate crops.
                             """,
                             "Leaf Blight": """
                                 🧪 **Treatment:**
-                                1. ✂️ Prune infected leaves and branches.
-                                2. 🧴 Apply fungicides (chlorothalonil, mancozeb).
+                                1. ✂️ Prune infected parts.
+                                2. 🧴 Apply fungicides.
                                 3. 🌬️ Improve air circulation.
-                                4. 🚫 Avoid working with wet plants.
                             """,
                             "Powdery Mildew": """
                                 🧪 **Treatment:**
-                                1. 🗑️ Remove heavily infected leaves.
-                                2. 🧴 Apply sulfur-based fungicides or neem oil.
-                                3. ☀️ Ensure 6+ hours of sunlight.
-                                4. 💧 Water at base, not on leaves.
+                                1. 🗑️ Remove infected leaves.
+                                2. 🧴 Apply sulfur or neem oil.
+                                3. ☀️ Increase sunlight.
                             """,
                             "Rust": """
                                 🧪 **Treatment:**
                                 1. ✂️ Remove infected leaves.
-                                2. 🧴 Apply fungicides (triadimefon, myclobutanil).
-                                3. 🌬️ Increase spacing to reduce humidity.
-                                4. 🌱 Use disease-free seeds.
+                                2. 🧴 Apply fungicides.
+                                3. 🌱 Use disease-free seeds.
                             """
                         }
-                        st.info(treatments.get(result, "Consult a local agricultural expert."))
+                        st.info(treatments.get(result, "Consult a local expert."))
                     else:
                         st.markdown(f"""
                         <div class="healthy-box">
@@ -243,13 +248,12 @@ else:
                             <p>Confidence: {confidence}%</p>
                         </div>
                         """, unsafe_allow_html=True)
-                        st.success("🌿 Your plant looks healthy! Continue proper care.")
-    
+                        st.success("🌿 Your plant looks healthy!")
     st.divider()
-    st.caption("📌 Demo Mode: Real disease model coming soon!")
+    st.caption("📌 Demo Mode: Real model coming soon!")
 
 # =============================================
-# 7. FOOTER
+# 9. FOOTER
 # =============================================
 st.markdown("""
 <div style="text-align: center; margin-top: 2rem; padding: 1rem; color: #5a7a6a; font-size: 0.9rem; border-top: 1px solid #ddd;">
